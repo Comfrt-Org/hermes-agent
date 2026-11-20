@@ -927,7 +927,7 @@ def build_environment_hints() -> str:
     return "\n\n".join(hints)
 
 
-CONTEXT_FILE_MAX_CHARS = 20_000
+CONTEXT_FILE_MAX_CHARS = 60_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 
