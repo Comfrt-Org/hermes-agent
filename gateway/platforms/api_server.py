@@ -979,6 +979,34 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return raw, None
 
+    def _parse_user_identity_headers(
+        self, request: "web.Request"
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Extract ``X-Hermes-User-Id`` and ``X-Hermes-User-Name`` headers.
+
+        Returns ``(user_id, user_name)``.  Both are optional and default to
+        ``None`` when absent.  These mirror the identity that native gateway
+        platforms (Slack, Telegram, etc.) set on ``SessionSource`` — they
+        let an external caller tell the agent who is talking so session
+        isolation, system-prompt injection and memory scoping work the same
+        way they do on messaging platforms.
+
+        Validation: reject control characters (header-injection defence,
+        matching the session-key and session-id guards) and cap length.
+        """
+        user_id = request.headers.get("X-Hermes-User-Id", "").strip() or None
+        user_name = request.headers.get("X-Hermes-User-Name", "").strip() or None
+
+        for label, val in (("User-Id", user_id), ("User-Name", user_name)):
+            if val and re.search(r'[\r\n\x00]', val):
+                logger.warning("X-Hermes-%s rejected: control characters", label)
+                return None, None
+            if val and len(val) > 256:
+                logger.warning("X-Hermes-%s rejected: too long", label)
+                return None, None
+
+        return user_id, user_name
+
     # ------------------------------------------------------------------
     # Session DB helper
     # ------------------------------------------------------------------
@@ -1010,6 +1038,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        user_id: Optional[str] = None,
+        user_name: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1025,6 +1055,11 @@ class APIServerAdapter(BasePlatformAdapter):
         key is meant to persist across transcripts so long-term memory
         providers (e.g. Honcho) can scope their per-chat state correctly
         — matching the semantics of the native gateway's ``session_key``.
+
+        ``user_id`` and ``user_name`` mirror the identity that native
+        gateway platforms set on SessionSource — they are injected into
+        the agent's system prompt and session context so the agent knows
+        who it is talking to.
         """
         from run_agent import AIAgent
         from gateway.run import _resolve_runtime_agent_kwargs, _resolve_gateway_model, _load_gateway_config, GatewayRunner
@@ -1061,6 +1096,8 @@ class APIServerAdapter(BasePlatformAdapter):
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
+            user_id=user_id,
+            user_name=user_name,
         )
         return agent
 
@@ -1543,6 +1580,7 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        user_id, user_name = self._parse_user_identity_headers(request)
         session_id = request.match_info["session_id"]
         _, err = self._get_existing_session_or_404(session_id)
         if err:
@@ -1563,6 +1601,8 @@ class APIServerAdapter(BasePlatformAdapter):
             ephemeral_system_prompt=system_prompt,
             session_id=session_id,
             gateway_session_key=gateway_session_key,
+            user_id=user_id,
+            user_name=user_name,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1600,6 +1640,8 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
+
+        user_id, user_name = self._parse_user_identity_headers(request)
 
         loop = asyncio.get_running_loop()
         queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
@@ -1654,6 +1696,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
+                    user_id=user_id,
+                    user_name=user_name,
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -1784,6 +1828,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+
+        user_id, user_name = self._parse_user_identity_headers(request)
 
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
@@ -1920,6 +1966,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                user_id=user_id,
+                user_name=user_name,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -1939,6 +1987,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                user_id=user_id,
+                user_name=user_name,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2800,6 +2850,8 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
 
+        user_id, user_name = self._parse_user_identity_headers(request)
+
         # Parse request body
         try:
             body = await request.json()
@@ -2952,6 +3004,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                user_id=user_id,
+                user_name=user_name,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -2985,6 +3039,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=instructions,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                user_id=user_id,
+                user_name=user_name,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -3495,6 +3551,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        user_id: Optional[str] = None,
+        user_name: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3517,6 +3575,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 chat_id=session_id or "",
                 session_key=gateway_session_key or session_id or "",
                 session_id=session_id or "",
+                user_id=user_id or "",
+                user_name=user_name or "",
             )
             try:
                 agent = self._create_agent(
@@ -3527,6 +3587,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_start_callback=tool_start_callback,
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
+                    user_id=user_id,
+                    user_name=user_name,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
@@ -3632,6 +3694,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+
+        user_id, user_name = self._parse_user_identity_headers(request)
 
         # Enforce concurrency limit
         if len(self._run_streams) >= self._MAX_CONCURRENT_RUNS:
@@ -3744,6 +3808,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_text_cb,
                     tool_progress_callback=event_cb,
                     gateway_session_key=gateway_session_key,
+                    user_id=user_id,
+                    user_name=user_name,
                 )
                 self._active_run_agents[run_id] = agent
 
@@ -3785,6 +3851,8 @@ class APIServerAdapter(BasePlatformAdapter):
                         session_tokens = set_session_vars(
                             platform="api_server",
                             session_key=approval_session_key,
+                            user_id=user_id or "",
+                            user_name=user_name or "",
                         )
                         register_gateway_notify(approval_session_key, _approval_notify)
                         r = agent.run_conversation(
