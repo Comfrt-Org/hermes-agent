@@ -4,6 +4,17 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## Singularity box: never restart the live gateway yourself
+
+This checkout runs the single live production gateway (Singularity in Slack,
+unit `hermes-gateway-singularity-gateway`). Do **not** restart, stop, or reload
+it via the CLI (`hermes gateway restart|stop|start`), `systemctl`, `kill`, or
+signals. If a change needs a restart, stop and ask the user to restart it from
+**Atls → Singularity → System tab → Restart gateway**, which requires a reason
+and an expected return time and posts that attribution to Slack. CLI restarts
+are unattributed, skip the Atls audit record, and take Singularity offline for
+everyone without saying who did it or why.
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a

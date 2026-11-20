@@ -1260,6 +1260,10 @@ from gateway.restart import (
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
     parse_restart_drain_timeout,
 )
+from gateway.restart_attribution import (
+    consume_restart_attribution,
+    format_attributed_message,
+)
 
 
 from gateway.whatsapp_identity import (
@@ -3953,6 +3957,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         restart_source = self._restart_command_source if self._restart_requested else None
 
         msg_key = "restarting" if self._restart_requested else "shutting_down"
+        attribution = consume_restart_attribution(_hermes_home)
+
+        def _shutdown_message(platform: "Platform") -> str:
+            text = self._lifecycle_message(platform, msg_key)
+            if platform == Platform.SLACK:
+                return format_attributed_message(text, attribution)
+            return text
 
         notified: set[tuple[str, str, Optional[str]]] = set()
         for session_key in active:
@@ -4027,7 +4038,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter=adapter,
                 )
 
-                result = await adapter.send(chat_id, self._lifecycle_message(platform, msg_key), metadata=metadata)
+                result = await adapter.send(chat_id, _shutdown_message(platform), metadata=metadata)
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to %s:%s: %s",
@@ -4075,7 +4086,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
 
             try:
-                shutdown_msg = self._lifecycle_message(platform, msg_key)
+                shutdown_msg = _shutdown_message(platform)
                 metadata = self._thread_metadata_for_target(
                     platform,
                     home.chat_id,
