@@ -1260,6 +1260,10 @@ from gateway.restart import (
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
     parse_restart_drain_timeout,
 )
+from gateway.restart_attribution import (
+    consume_restart_attribution,
+    format_attributed_message,
+)
 
 
 from gateway.whatsapp_identity import (
@@ -3953,6 +3957,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         restart_source = self._restart_command_source if self._restart_requested else None
 
         msg_key = "restarting" if self._restart_requested else "shutting_down"
+        attribution = consume_restart_attribution(_hermes_home)
+
+        def _shutdown_message(platform: "Platform") -> str:
+            text = self._lifecycle_message(platform, msg_key)
+            if platform == Platform.SLACK:
+                return format_attributed_message(text, attribution)
+            return text
 
         notified: set[tuple[str, str, Optional[str]]] = set()
         for session_key in active:
@@ -4027,7 +4038,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter=adapter,
                 )
 
-                result = await adapter.send(chat_id, self._lifecycle_message(platform, msg_key), metadata=metadata)
+                result = await adapter.send(chat_id, _shutdown_message(platform), metadata=metadata)
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to %s:%s: %s",
@@ -4075,7 +4086,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
 
             try:
-                shutdown_msg = self._lifecycle_message(platform, msg_key)
+                shutdown_msg = _shutdown_message(platform)
                 metadata = self._thread_metadata_for_target(
                     platform,
                     home.chat_id,
@@ -13107,6 +13118,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _env_tp and not _tool_progress_configured
             else (_resolved_tp or _env_tp or "all")
         )
+        # Per-tool progress allowlist (globs). When set, it force-enables tool
+        # progress for this platform and restricts rendered bubbles to matching
+        # tools only (see progress_callback). Empty (default) = no filtering.
+        tool_progress_filter = resolve_display_setting(
+            user_config, platform_key, "tool_progress_filter", []
+        ) or []
+        if tool_progress_filter and progress_mode == "off":
+            # A filter is an explicit opt-in to see specific tools even on
+            # platforms where progress defaults off (e.g. Slack). Promote to
+            # "all"; the callback still drops everything not matching a glob.
+            progress_mode = "all"
         # Disable tool progress for webhooks - they don't support message editing,
         # so each progress line would be sent as a separate message.
         from gateway.config import Platform
@@ -13237,6 +13259,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Only act on tool.started events (ignore tool.completed, reasoning.available, etc.)
             if event_type not in {"tool.started",}:
                 return
+
+            # Per-tool progress allowlist: when a filter is configured, only
+            # render bubbles for tools whose name matches one of the globs
+            # (e.g. ["mcp_experts_*"] to surface Experts MCP calls only). No
+            # filter (default) → show everything, stock behavior.
+            if tool_progress_filter:
+                import fnmatch as _fnmatch
+                _tn = tool_name or ""
+                if not any(_fnmatch.fnmatch(_tn, _pat) for _pat in tool_progress_filter):
+                    return
 
             # Suppress tool-progress bubbles once the user has sent `stop`.
             # When the LLM response carries N parallel tool calls, the agent

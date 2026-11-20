@@ -316,7 +316,14 @@ class SlackAdapter(BasePlatformAdapter):
       - Typing indicators (not natively supported by Slack bots)
     """
 
-    MAX_MESSAGE_LENGTH = 39000  # Slack API allows 40,000 chars; leave margin
+    # 40,000 is the chat.postMessage API ceiling, but Slack splits anything
+    # over ~4,000 chars into multiple messages server-side — and it splits on
+    # a raw line boundary with no markdown awareness, so a fenced code block
+    # gets guillotined (opening ``` in one message, closing ``` in the next,
+    # neither rendering as code). Chunking below that threshold keeps the
+    # split ours: truncate_message() closes and reopens the fence across
+    # chunks and labels them (1/2). 3900 leaves room for that indicator.
+    MAX_MESSAGE_LENGTH = 3900
     supports_code_blocks = True  # Slack mrkdwn renders fenced code blocks
     # Slack blocks typed native slash commands inside threads ("/approve is
     # not supported in threads. Sorry!").  The adapter rewrites a leading
